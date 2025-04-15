@@ -1,6 +1,14 @@
 import BN from "bn.js";
+import Decimal from "decimal.js";
 import { SafeMath } from "./safeMath";
-import { Rounding, safeMulDivCastU64 } from "./utilsMath";
+import { 
+  Rounding, 
+  safeMulDivCastU64, 
+  bnToDecimal, 
+  decimalToBN, 
+  batchBnToDecimal,
+  mulDivBN
+} from "./utilsMath";
 import {
   BASIS_POINT_MAX,
   FEE_DENOMINATOR,
@@ -48,27 +56,36 @@ export function getFeeInPeriod(
   reductionFactor: BN,
   period: number
 ): BN {
+  // Early return for period 0
   if (period === 0) {
     return cliffFeeNumerator;
   }
-
-  let feeNumerator = cliffFeeNumerator;
-  const reductionFactorBasisPoint = SafeMath.div(
-    SafeMath.mul(reductionFactor, new BN(BASIS_POINT_MAX)),
-    new BN(BASIS_POINT_MAX)
-  );
-
-  for (let i = 0; i < period; i++) {
-    feeNumerator = SafeMath.div(
-      SafeMath.mul(
-        feeNumerator,
-        SafeMath.sub(new BN(BASIS_POINT_MAX), reductionFactorBasisPoint)
-      ),
-      new BN(BASIS_POINT_MAX)
+  
+  // Early return for period 1 with simple calculation
+  if (period === 1) {
+    const basisPointMax = new BN(BASIS_POINT_MAX);
+    return mulDivBN(
+      cliffFeeNumerator,
+      basisPointMax.sub(reductionFactor),
+      basisPointMax,
+      Rounding.Down
     );
   }
 
-  return feeNumerator;
+  // Convert to Decimal for higher precision in one batch
+  const [cliffFeeDecimal, reductionFactorDecimal] = 
+    batchBnToDecimal(cliffFeeNumerator, reductionFactor);
+  const basisPointMaxDecimal = new Decimal(BASIS_POINT_MAX);
+  
+  // Batch operations in Decimal
+  // Calculate (1 - reduction_factor/10_000)
+  const multiplier = basisPointMaxDecimal.sub(reductionFactorDecimal).div(basisPointMaxDecimal);
+  
+  // Calculate (1 - reduction_factor/10_000)^period in one operation
+  const feeNumeratorDecimal = cliffFeeDecimal.mul(multiplier.pow(period));
+  
+  // Convert back to BN
+  return decimalToBN(feeNumeratorDecimal, Rounding.Down);
 }
 
 /**
@@ -89,39 +106,56 @@ export function getCurrentBaseFeeNumerator(
   currentPoint: BN,
   activationPoint: BN
 ): BN {
+  // Early return for zero period frequency
   if (baseFee.periodFrequency.isZero()) {
     return baseFee.cliffFeeNumerator;
   }
 
-  // Can trade before activation point, so if it is alpha-vault, we use min fee
-  let period: BN;
-  if (currentPoint.lt(activationPoint)) {
-    period = new BN(baseFee.numberOfPeriod);
-  } else {
-    period = SafeMath.div(
-      SafeMath.sub(currentPoint, activationPoint),
-      baseFee.periodFrequency
+  // Convert to Decimal for higher precision in one batch
+  const [currentPointDecimal, activationPointDecimal, periodFrequencyDecimal, 
+         cliffFeeNumeratorDecimal, reductionFactorDecimal] = 
+    batchBnToDecimal(
+      currentPoint, 
+      activationPoint, 
+      baseFee.periodFrequency, 
+      baseFee.cliffFeeNumerator, 
+      baseFee.reductionFactor
     );
-    if (period.gt(new BN(baseFee.numberOfPeriod))) {
-      period = new BN(baseFee.numberOfPeriod);
+  
+  // Calculate period
+  let periodDecimal: Decimal;
+  if (currentPointDecimal.lt(activationPointDecimal)) {
+    // Before activation point, use max period (min fee)
+    periodDecimal = new Decimal(baseFee.numberOfPeriod);
+  } else {
+    // Calculate elapsed periods
+    periodDecimal = currentPointDecimal.sub(activationPointDecimal)
+      .div(periodFrequencyDecimal)
+      .floor();
+    
+    // Cap at max number of periods
+    if (periodDecimal.gt(new Decimal(baseFee.numberOfPeriod))) {
+      periodDecimal = new Decimal(baseFee.numberOfPeriod);
     }
   }
 
   const feeSchedulerMode = baseFee.feeSchedulerMode;
 
   if (feeSchedulerMode === FeeSchedulerMode.Linear) {
-    const feeNumerator = SafeMath.sub(
-      baseFee.cliffFeeNumerator,
-      SafeMath.mul(period, baseFee.reductionFactor)
+    // Calculate with Decimal.js in one operation
+    const feeNumeratorDecimal = cliffFeeNumeratorDecimal.sub(
+      periodDecimal.mul(reductionFactorDecimal)
     );
-    return feeNumerator;
+    
+    // Convert back to BN
+    return decimalToBN(feeNumeratorDecimal, Rounding.Down);
   } else if (feeSchedulerMode === FeeSchedulerMode.Exponential) {
-    const feeNumerator = getFeeInPeriod(
+    // For exponential mode, use the optimized getFeeInPeriod function
+    return getFeeInPeriod(
       baseFee.cliffFeeNumerator,
       baseFee.reductionFactor,
-      period.toNumber()
+      periodDecimal.toNumber()
     );
-    return feeNumerator;
   } else {
     throw new Error("Invalid fee scheduler mode");
   }
@@ -249,26 +283,30 @@ export function getVariableFee(dynamicFee: {
   volatilityAccumulator: BN;
   volatilityReference: BN;
 }): BN {
+  // Early return if not initialized
   if (dynamicFee.initialized === 0) {
     return new BN(0);
   }
 
-  // Square of volatility accumulator * bin step
-  const squareVfaBin = SafeMath.mul(
-    SafeMath.mul(dynamicFee.volatilityAccumulator, new BN(dynamicFee.binStep)),
-    SafeMath.mul(dynamicFee.volatilityAccumulator, new BN(dynamicFee.binStep))
-  );
+  // Early return if volatility accumulator is zero
+  if (dynamicFee.volatilityAccumulator.isZero()) {
+    return new BN(0);
+  }
 
-  // Variable fee control, volatility accumulator, bin step are in basis point unit (10_000)
-  // Scale down to 1e9 unit and ceiling the remaining
-  const vFee = SafeMath.mul(
-    squareVfaBin,
-    new BN(dynamicFee.variableFeeControl)
-  );
-  const scaledVFee = SafeMath.div(
-    SafeMath.add(vFee, new BN(99_999_999_999)),
-    new BN(100_000_000_000)
-  );
-
-  return scaledVFee;
+  // Convert to Decimal for higher precision
+  const volatilityAccumulatorDecimal = bnToDecimal(dynamicFee.volatilityAccumulator);
+  const binStepDecimal = new Decimal(dynamicFee.binStep);
+  const variableFeeControlDecimal = new Decimal(dynamicFee.variableFeeControl);
+  
+  // Batch operations in Decimal
+  // Calculate (volatilityAccumulator * binStep)^2 * variableFeeControl
+  const volatilityTimesBinStep = volatilityAccumulatorDecimal.mul(binStepDecimal);
+  const vFee = volatilityTimesBinStep.pow(2).mul(variableFeeControlDecimal);
+  
+  // Scale down to 1e9 unit with ceiling
+  const scaleFactor = new Decimal(100_000_000_000);
+  const scaledVFee = vFee.add(scaleFactor.sub(new Decimal(1))).div(scaleFactor).floor();
+  
+  // Convert back to BN
+  return decimalToBN(scaledVFee, Rounding.Down);
 }

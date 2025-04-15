@@ -1,6 +1,7 @@
 import BN from "bn.js";
+import Decimal from "decimal.js";
 import { SafeMath } from "./safeMath";
-import { Rounding, mulDiv } from "./utilsMath";
+import { Rounding, mulDiv, bnToDecimal, decimalToBN, batchBnToDecimal } from "./utilsMath";
 import { RESOLUTION } from "./constants";
 
 /**
@@ -19,15 +20,28 @@ export function getDeltaAmountBaseUnsigned(
   liquidity: BN,
   round: Rounding
 ): BN {
-  const numerator1 = liquidity;
-  const numerator2 = SafeMath.sub(upperSqrtPrice, lowerSqrtPrice);
-  const denominator = SafeMath.mul(lowerSqrtPrice, upperSqrtPrice);
+  // Skip calculation for zero liquidity
+  if (liquidity.isZero()) {
+    return new BN(0);
+  }
+
+  // Convert to Decimal for higher precision in one batch
+  const [lowerSqrtPriceDecimal, upperSqrtPriceDecimal, liquidityDecimal] = 
+    batchBnToDecimal(lowerSqrtPrice, upperSqrtPrice, liquidity);
+
+  // Batch operations in Decimal
+  const numerator = upperSqrtPriceDecimal.sub(lowerSqrtPriceDecimal);
+  const denominator = lowerSqrtPriceDecimal.mul(upperSqrtPriceDecimal);
 
   if (denominator.isZero()) {
     throw new Error("Denominator cannot be zero");
   }
 
-  return mulDiv(numerator1, numerator2, denominator, round);
+  // Calculate with Decimal.js in one operation
+  const result = liquidityDecimal.mul(numerator).div(denominator);
+  
+  // Convert back to BN with appropriate rounding
+  return decimalToBN(result, round);
 }
 
 /**
@@ -45,21 +59,24 @@ export function getDeltaAmountQuoteUnsigned(
   liquidity: BN,
   round: Rounding
 ): BN {
-  const prod = SafeMath.mul(
-    liquidity,
-    SafeMath.sub(upperSqrtPrice, lowerSqrtPrice)
-  );
-
-  if (round === Rounding.Up) {
-    const denominator = new BN(1).shln(RESOLUTION * 2);
-    // Ceiling division
-    return SafeMath.add(
-      SafeMath.div(prod, denominator),
-      prod.mod(denominator).isZero() ? new BN(0) : new BN(1)
-    );
-  } else {
-    return SafeMath.shr(prod, RESOLUTION * 2);
+  // Skip calculation for zero liquidity
+  if (liquidity.isZero()) {
+    return new BN(0);
   }
+
+  // Convert to Decimal for higher precision in one batch
+  const [lowerSqrtPriceDecimal, upperSqrtPriceDecimal, liquidityDecimal] = 
+    batchBnToDecimal(lowerSqrtPrice, upperSqrtPrice, liquidity);
+
+  // Batch operations in Decimal
+  const deltaSqrtPrice = upperSqrtPriceDecimal.sub(lowerSqrtPriceDecimal);
+  const denominator = new Decimal(2).pow(RESOLUTION * 2);
+  
+  // Calculate with Decimal.js in one operation
+  const result = liquidityDecimal.mul(deltaSqrtPrice).div(denominator);
+  
+  // Convert back to BN with appropriate rounding
+  return decimalToBN(result, round);
 }
 
 /**
@@ -97,7 +114,7 @@ export function getNextSqrtPriceFromInput(
 }
 
 /**
- * Gets the next sqrt price √P' given a delta of token_a
+ * Gets the next sqrt price from amount base rounding up
  * Formula: √P' = √P * L / (L + Δx * √P)
  * @param sqrtPrice Current sqrt price
  * @param liquidity Liquidity
@@ -109,14 +126,24 @@ export function getNextSqrtPriceFromAmountBaseRoundingUp(
   liquidity: BN,
   amount: BN
 ): BN {
+  // Early return for zero amount
   if (amount.isZero()) {
     return sqrtPrice;
   }
 
-  const product = SafeMath.mul(amount, sqrtPrice);
-  const denominator = SafeMath.add(liquidity, product);
+  // Convert to Decimal for higher precision in one batch
+  const [sqrtPriceDecimal, liquidityDecimal, amountDecimal] = 
+    batchBnToDecimal(sqrtPrice, liquidity, amount);
 
-  return mulDiv(liquidity, sqrtPrice, denominator, Rounding.Up);
+  // Batch operations in Decimal
+  const product = amountDecimal.mul(sqrtPriceDecimal);
+  const denominator = liquidityDecimal.add(product);
+  
+  // Calculate with Decimal.js in one operation
+  const result = liquidityDecimal.mul(sqrtPriceDecimal).div(denominator);
+  
+  // Convert back to BN with ceiling rounding
+  return decimalToBN(result, Rounding.Up);
 }
 
 /**
@@ -132,12 +159,25 @@ export function getNextSqrtPriceFromAmountQuoteRoundingDown(
   liquidity: BN,
   amount: BN
 ): BN {
-  const quotient = SafeMath.div(
-    SafeMath.shl(amount, RESOLUTION * 2),
-    liquidity
-  );
+  // Early return for zero amount
+  if (amount.isZero()) {
+    return sqrtPrice;
+  }
 
-  return SafeMath.add(sqrtPrice, quotient);
+  // Convert to Decimal for higher precision in one batch
+  const [sqrtPriceDecimal, liquidityDecimal, amountDecimal] = 
+    batchBnToDecimal(sqrtPrice, liquidity, amount);
+
+  // Batch operations in Decimal
+  const scaleFactor = new Decimal(2).pow(RESOLUTION * 2);
+  
+  // Calculate with Decimal.js in one operation
+  const result = sqrtPriceDecimal.add(
+    amountDecimal.mul(scaleFactor).div(liquidityDecimal)
+  );
+  
+  // Convert back to BN with floor rounding
+  return decimalToBN(result, Rounding.Down);
 }
 
 /**

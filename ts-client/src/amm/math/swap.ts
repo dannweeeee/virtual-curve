@@ -1,4 +1,5 @@
 import BN from "bn.js";
+import Decimal from "decimal.js";
 import { SafeMath } from "./safeMath";
 import { MAX_CURVE_POINT } from "./constants";
 import {
@@ -7,7 +8,7 @@ import {
   getNextSqrtPriceFromInput,
 } from "./curve";
 import { FeeMode, FeeOnAmountResult, getFeeOnAmount } from "./feeMath";
-import { Rounding } from "./utilsMath";
+import { Rounding, bnToDecimal, decimalToBN, batchBnToDecimal } from "./utilsMath";
 
 /**
  * Trade direction
@@ -171,7 +172,16 @@ export function getSwapAmountFromBaseToQuote(
   currentSqrtPrice: BN,
   amountIn: BN
 ): SwapAmount {
-  let totalOutputAmount = new BN(0);
+  // Early return for zero amount
+  if (amountIn.isZero()) {
+    return {
+      outputAmount: new BN(0),
+      nextSqrtPrice: currentSqrtPrice,
+    };
+  }
+
+  // Using Decimal.js for tracking total output with higher precision
+  let totalOutputAmountDecimal = new Decimal(0);
   let sqrtPrice = currentSqrtPrice;
   let amountLeft = amountIn;
 
@@ -180,17 +190,25 @@ export function getSwapAmountFromBaseToQuote(
     if (i >= configState.curve.length) continue;
     
     if (configState.curve[i].sqrtPrice.lt(sqrtPrice)) {
+      // Get the current liquidity
+      const currentLiquidity = i + 1 < configState.curve.length 
+        ? configState.curve[i + 1].liquidity 
+        : configState.curve[i].liquidity;
+      
+      // Skip if liquidity is zero
+      if (currentLiquidity.isZero()) continue;
+      
       const maxAmountIn = getDeltaAmountBaseUnsigned(
         configState.curve[i].sqrtPrice,
         sqrtPrice,
-        i + 1 < configState.curve.length ? configState.curve[i + 1].liquidity : configState.curve[i].liquidity,
+        currentLiquidity,
         Rounding.Up
       );
 
       if (amountLeft.lt(maxAmountIn)) {
         const nextSqrtPrice = getNextSqrtPriceFromInput(
           sqrtPrice,
-          i + 1 < configState.curve.length ? configState.curve[i + 1].liquidity : configState.curve[i].liquidity,
+          currentLiquidity,
           amountLeft,
           true
         );
@@ -198,11 +216,12 @@ export function getSwapAmountFromBaseToQuote(
         const outputAmount = getDeltaAmountQuoteUnsigned(
           nextSqrtPrice,
           sqrtPrice,
-          i + 1 < configState.curve.length ? configState.curve[i + 1].liquidity : configState.curve[i].liquidity,
+          currentLiquidity,
           Rounding.Down
         );
 
-        totalOutputAmount = SafeMath.add(totalOutputAmount, outputAmount);
+        // Add to total using Decimal.js
+        totalOutputAmountDecimal = totalOutputAmountDecimal.add(bnToDecimal(outputAmount));
         sqrtPrice = nextSqrtPrice;
         amountLeft = new BN(0);
         break;
@@ -211,11 +230,12 @@ export function getSwapAmountFromBaseToQuote(
         const outputAmount = getDeltaAmountQuoteUnsigned(
           nextSqrtPrice,
           sqrtPrice,
-          i + 1 < configState.curve.length ? configState.curve[i + 1].liquidity : configState.curve[i].liquidity,
+          currentLiquidity,
           Rounding.Down
         );
 
-        totalOutputAmount = SafeMath.add(totalOutputAmount, outputAmount);
+        // Add to total using Decimal.js
+        totalOutputAmountDecimal = totalOutputAmountDecimal.add(bnToDecimal(outputAmount));
         sqrtPrice = nextSqrtPrice;
         amountLeft = SafeMath.sub(amountLeft, maxAmountIn);
       }
@@ -223,7 +243,7 @@ export function getSwapAmountFromBaseToQuote(
   }
 
   // Process remaining amount
-  if (!amountLeft.isZero()) {
+  if (!amountLeft.isZero() && !configState.curve[0].liquidity.isZero()) {
     const nextSqrtPrice = getNextSqrtPriceFromInput(
       sqrtPrice,
       configState.curve[0].liquidity,
@@ -238,9 +258,13 @@ export function getSwapAmountFromBaseToQuote(
       Rounding.Down
     );
 
-    totalOutputAmount = SafeMath.add(totalOutputAmount, outputAmount);
+    // Add to total using Decimal.js
+    totalOutputAmountDecimal = totalOutputAmountDecimal.add(bnToDecimal(outputAmount));
     sqrtPrice = nextSqrtPrice;
   }
+
+  // Convert final Decimal result back to BN
+  const totalOutputAmount = decimalToBN(totalOutputAmountDecimal, Rounding.Down);
 
   return {
     outputAmount: totalOutputAmount,
@@ -266,13 +290,25 @@ export function getSwapAmountFromQuoteToBase(
   currentSqrtPrice: BN,
   amountIn: BN
 ): SwapAmount {
-  let totalOutputAmount = new BN(0);
+  // Early return for zero amount
+  if (amountIn.isZero()) {
+    return {
+      outputAmount: new BN(0),
+      nextSqrtPrice: currentSqrtPrice,
+    };
+  }
+
+  // Using Decimal.js for tracking total output with higher precision
+  let totalOutputAmountDecimal = new Decimal(0);
   let sqrtPrice = currentSqrtPrice;
   let amountLeft = amountIn;
 
   // Iterate through the curve points
   for (let i = 0; i < MAX_CURVE_POINT; i++) {
     if (i >= configState.curve.length) continue;
+    
+    // Skip if liquidity is zero
+    if (configState.curve[i].liquidity.isZero()) continue;
     
     if (configState.curve[i].sqrtPrice.gt(sqrtPrice)) {
       const maxAmountIn = getDeltaAmountQuoteUnsigned(
@@ -297,7 +333,8 @@ export function getSwapAmountFromQuoteToBase(
           Rounding.Down
         );
 
-        totalOutputAmount = SafeMath.add(totalOutputAmount, outputAmount);
+        // Add to total using Decimal.js
+        totalOutputAmountDecimal = totalOutputAmountDecimal.add(bnToDecimal(outputAmount));
         sqrtPrice = nextSqrtPrice;
         amountLeft = new BN(0);
         break;
@@ -310,7 +347,8 @@ export function getSwapAmountFromQuoteToBase(
           Rounding.Down
         );
 
-        totalOutputAmount = SafeMath.add(totalOutputAmount, outputAmount);
+        // Add to total using Decimal.js
+        totalOutputAmountDecimal = totalOutputAmountDecimal.add(bnToDecimal(outputAmount));
         sqrtPrice = nextSqrtPrice;
         amountLeft = SafeMath.sub(amountLeft, maxAmountIn);
       }
@@ -319,9 +357,11 @@ export function getSwapAmountFromQuoteToBase(
 
   // Check if all amount was processed
   if (!amountLeft.isZero()) {
-    // Instead of throwing an error, just return what we've processed so far
-    console.warn("Not enough liquidity to process the entire amount");
+    throw new Error("Not enough liquidity to process the entire amount");
   }
+
+  // Convert final Decimal result back to BN
+  const totalOutputAmount = decimalToBN(totalOutputAmountDecimal, Rounding.Down);
 
   return {
     outputAmount: totalOutputAmount,
