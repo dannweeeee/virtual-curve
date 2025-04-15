@@ -1,0 +1,63 @@
+{
+  "name": "@dannweeeee/virtual-curve-sdk",
+  "version": "1.0.0",
+  "description": "Virtual Curve SDK is a typescript library that allows you to interact with Meteora's Virtual Curve",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "test:createConfig": "jest ./src/amm/tests/devnet/createConfig.test.ts --runInBand",
+    "test:createPool": "jest ./src/amm/tests/devnet/createPool.test.ts --runInBand",
+    "test:swap": "jest ./src/amm/tests/devnet/swap.test.ts --runInBand",
+    "createConfig": "tsx ./src/amm/scripts/createConfig.ts",
+    "getConfig": "tsx ./src/amm/scripts/getConfig.ts"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "meteora",
+    "finance",
+    "virtual",
+    "curve",
+    "sdk",
+    "solana"
+  ],
+  "author": "@dannweeeee",
+  "license": "MIT",
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.31.0",
+    "@coral-xyz/borsh": "^0.31.0",
+    "@solana/buffer-layout": "^4",
+    "@solana/spl-token": "^0.4.6",
+    "@solana/web3.js": "1.98.0",
+    "bn.js": "5.2.1",
+    "bs58": "^6.0.0",
+    "decimal.js": "^10.4.1",
+    "dotenv": "^16.4.7",
+    "invariant": "^2.2.4"
+  },
+  "devDependencies": {
+    "@tsconfig/recommended": "^1.0.1",
+    "@types/bn.js": "^5.1.0",
+    "@types/chai": "^4.3.1",
+    "@types/invariant": "^2.2.35",
+    "@types/jest": "^27.5.1",
+    "@types/mocha": "^10.0.10",
+    "@types/sinon": "^17.0.4",
+    "chai": "^4.3.6",
+    "jest": "^28.1.0",
+    "sinon": "^20.0.0",
+    "ts-jest": "^28.0.2",
+    "tsup": "^8.0.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "@solana/buffer-layout": "^4"
+  },
+  "resolutions": {
+    "@solana/buffer-layout": "^4"
+  }
+}
